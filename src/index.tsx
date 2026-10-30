@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { Layout } from './views/layout'
+import { parseBankPaste, parseCodPaste } from './reconcile'
 import { type Env, type Business, audit, baht, listBusinesses, placeholders, scopeIds, stockOwner, stockScope, toSatang } from './db'
 
 type Vars = { businesses: Business[]; selected: number | null; scope: number[]; stockScope: number[] }
@@ -365,6 +366,163 @@ app.post('/orders', async (c) => {
   await db.batch(stmts)
   await audit(db, 'orders', orderId, 'create', f)
   return c.redirect(back('/orders', sel, { ok: `บันทึกออเดอร์ #${orderId} แล้ว` }))
+})
+
+// ---------- จับคู่ยอดเงิน ----------
+// ยอดที่ยังค้างของออเดอร์ = ราคาขาย - เงินที่ยืนยันแล้ว
+const OUTSTANDING = `o.price_satang - COALESCE((SELECT SUM(p.amount_satang) FROM payments p WHERE p.order_id = o.id AND p.match_status = 'confirmed'), 0)`
+
+async function markPaidIfComplete(db: D1Database, orderId: number) {
+  await db.prepare(`UPDATE orders SET status = 'paid' WHERE id = ? AND (${OUTSTANDING.replaceAll('o.', 'orders.')}) <= 0`).bind(orderId).run()
+}
+
+app.get('/reconcile', async (c) => {
+  const scope = c.get('scope')
+  const ph = placeholders(scope.length)
+  const db = c.env.DB
+  const { results: txns } = await db.prepare(
+    `SELECT t.id, t.txn_at, t.amount_satang, t.description, t.account, b.name business
+     FROM bank_transactions t JOIN businesses b ON b.id = t.business_id
+     WHERE t.business_id IN (${ph}) AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.bank_txn_id = t.id)
+     ORDER BY t.txn_at DESC LIMIT 200`,
+  ).bind(...scope).all<any>()
+
+  // หาออเดอร์โอนที่ยอดค้างตรงกับเงินเข้า และขายภายใน 10 วันก่อนถึง 2 วันหลังวันโอน
+  const suggestions = await Promise.all(
+    txns.map((t) =>
+      db.prepare(
+        `SELECT o.id, o.sold_on, o.price_satang, c.facebook_name, c.full_name
+         FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
+         WHERE o.business_id IN (${ph}) AND o.payment_type IN ('transfer', 'mixed') AND o.status NOT IN ('paid', 'cancelled')
+           AND (${OUTSTANDING}) = ? AND o.sold_on BETWEEN date(?, '-10 days') AND date(?, '+2 days')
+         ORDER BY abs(julianday(o.sold_on) - julianday(?)) LIMIT 3`,
+      ).bind(...scope, t.amount_satang, t.txn_at, t.txn_at, t.txn_at).all<any>().then((r) => r.results),
+    ),
+  )
+  const { results: openCod } = await db.prepare(
+    `SELECT s.tracking_no, s.carrier, s.cod_satang, o.sold_on, c.facebook_name FROM shipments s
+     JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id
+     WHERE o.business_id IN (${ph}) AND s.cod_satang > 0 AND s.status != 'cod_settled'
+     ORDER BY o.sold_on LIMIT 200`,
+  ).bind(...scope).all<any>()
+
+  return page(
+    c,
+    'จับคู่ยอดเงิน',
+    <>
+      <div class="card">
+        <h3>นำเข้า statement ธนาคาร</h3>
+        <p>คัดลอกแถวจาก statement หรือแท็บกสิกร/BankNoi แล้ววางทั้งก้อน แถวที่เคยนำเข้าแล้วจะถูกข้าม</p>
+        <form method="post" action="/reconcile/bank">
+          <div class="inline">
+            <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} />
+            <label>บัญชี<input name="account" placeholder="กสิกร x1234" required /></label>
+          </div>
+          <textarea name="paste" rows={6} style="width:100%;margin:8px 0" required></textarea>
+          <button>นำเข้า</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>นำเข้ารอบโอน COD</h3>
+        <p>วางแถวจากไฟล์ COD ของ iship/Flash/Kerry (ต้องมีเลขพัสดุและยอด COD) ระบบจับคู่ด้วยเลขพัสดุให้ทันที</p>
+        <form method="post" action="/reconcile/cod">
+          <textarea name="paste" rows={6} style="width:100%;margin:8px 0" required></textarea>
+          <button>นำเข้า</button>
+        </form>
+      </div>
+      <div class="card scroll">
+        <h3>เงินเข้าที่ยังไม่ได้จับคู่ ({txns.length})</h3>
+        <table>
+          <tr><th>เวลา</th><th>ยอด</th><th>รายละเอียด</th><th>ออเดอร์ที่น่าจะใช่</th></tr>
+          {txns.map((t, i) => (
+            <tr>
+              <td>{t.txn_at.replace('T', ' ').slice(0, 16)}</td>
+              <td>{baht(t.amount_satang)}</td>
+              <td>{t.description}</td>
+              <td>
+                {suggestions[i].length === 0
+                  ? 'ไม่พบ'
+                  : suggestions[i].map((o: any) => (
+                      <form method="post" action="/reconcile/confirm" style="display:inline-block;margin:2px">
+                        <input type="hidden" name="txn_id" value={String(t.id)} />
+                        <input type="hidden" name="order_id" value={String(o.id)} />
+                        <button>#{o.id} {o.facebook_name ?? o.full_name} ({o.sold_on})</button>
+                      </form>
+                    ))}
+              </td>
+            </tr>
+          ))}
+        </table>
+      </div>
+      <div class="card scroll">
+        <h3>พัสดุ COD ที่ยังไม่ได้รับเงิน ({openCod.length})</h3>
+        <table>
+          <tr><th>วันที่ขาย</th><th>เลขพัสดุ</th><th>ขนส่ง</th><th>ยอด COD</th><th>ลูกค้า</th></tr>
+          {openCod.map((s) => (
+            <tr><td>{s.sold_on}</td><td>{s.tracking_no}</td><td>{s.carrier}</td><td>{baht(s.cod_satang)}</td><td>{s.facebook_name}</td></tr>
+          ))}
+        </table>
+      </div>
+    </>,
+  )
+})
+
+app.post('/reconcile/bank', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const rows = parseBankPaste(f.paste ?? '')
+  if (rows.length === 0) return c.redirect(back('/reconcile', sel, { err: 'อ่านแถวเงินเข้าไม่ได้ ต้องมีวันที่ (วว/ดด/ปปปป) และยอดเงิน' }))
+  const batch = new Date().toISOString()
+  const res = await c.env.DB.batch(
+    rows.map((r) =>
+      c.env.DB.prepare(
+        'INSERT OR IGNORE INTO bank_transactions (business_id, account, txn_at, amount_satang, description, ref_code, import_batch) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).bind(Number(f.business_id), f.account.trim(), r.txnAt, r.amount, r.description, r.refCode, batch),
+    ),
+  )
+  const added = res.reduce((n, r) => n + (r.meta.changes ?? 0), 0)
+  return c.redirect(back('/reconcile', sel, { ok: `นำเข้า ${added} แถว (ข้ามแถวซ้ำ ${rows.length - added})` }))
+})
+
+app.post('/reconcile/cod', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const db = c.env.DB
+  const rows = parseCodPaste(f.paste ?? '')
+  if (rows.length === 0) return c.redirect(back('/reconcile', sel, { err: 'อ่านแถว COD ไม่ได้ ต้องมีเลขพัสดุและยอดเงิน' }))
+  let matched = 0
+  const missing: string[] = []
+  for (const r of rows) {
+    const ship = await db.prepare('SELECT id, order_id, status FROM shipments WHERE tracking_no = ?').bind(r.tracking).first<{ id: number; order_id: number; status: string }>()
+    if (!ship) { missing.push(r.tracking); continue }
+    if (ship.status === 'cod_settled') continue
+    await db.batch([
+      db.prepare("UPDATE shipments SET status = 'cod_settled', cod_fee_satang = ? WHERE id = ?").bind(r.fee, ship.id),
+      db.prepare("INSERT INTO payments (order_id, kind, amount_satang, paid_on, shipment_id, match_status) VALUES (?, 'cod', ?, ?, ?, 'confirmed')")
+        .bind(ship.order_id, r.cod, r.depositOn ?? new Date().toISOString().slice(0, 10), ship.id),
+    ])
+    await markPaidIfComplete(db, ship.order_id)
+    matched++
+  }
+  const msg = `จับคู่ COD ได้ ${matched} พัสดุ` + (missing.length ? ` · ไม่พบในระบบ ${missing.length}: ${missing.slice(0, 10).join(', ')}` : '')
+  return c.redirect(back('/reconcile', sel, missing.length ? { err: msg } : { ok: msg }))
+})
+
+app.post('/reconcile/confirm', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const db = c.env.DB
+  const txn = await db.prepare('SELECT id, txn_at, amount_satang FROM bank_transactions WHERE id = ?').bind(Number(f.txn_id)).first<{ id: number; txn_at: string; amount_satang: number }>()
+  if (!txn) return c.redirect(back('/reconcile', sel, { err: 'ไม่พบรายการเงินเข้า' }))
+  const used = await db.prepare('SELECT 1 FROM payments WHERE bank_txn_id = ?').bind(txn.id).first()
+  if (used) return c.redirect(back('/reconcile', sel, { err: 'รายการนี้จับคู่ไปแล้ว' }))
+  const orderId = Number(f.order_id)
+  await db.prepare("INSERT INTO payments (order_id, kind, amount_satang, paid_on, bank_txn_id, match_status) VALUES (?, 'transfer', ?, ?, ?, 'confirmed')")
+    .bind(orderId, txn.amount_satang, txn.txn_at.slice(0, 10), txn.id)
+    .run()
+  await markPaidIfComplete(db, orderId)
+  await audit(db, 'payments', txn.id, 'match', { order_id: orderId })
+  return c.redirect(back('/reconcile', sel, { ok: `จับคู่เงิน ${baht(txn.amount_satang)} กับออเดอร์ #${orderId} แล้ว` }))
 })
 
 // ---------- API สำหรับระบบอื่น ----------

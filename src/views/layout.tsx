@@ -20,7 +20,7 @@ th { color:var(--muted); font-weight:600; }
 .scroll { overflow-x:auto; }
 form.inline { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:8px; align-items:end; }
 label { display:flex; flex-direction:column; font-size:13px; color:var(--muted); gap:4px; }
-input, select, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink); }
+input, select, button, textarea { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink); }
 button { background:var(--accent); color:#fff; border:none; cursor:pointer; }
 .flash { padding:8px 12px; border-radius:6px; background:#e5f4e4; color:#1d1d1b; margin-bottom:12px; }
 .error { background:#fbebeb; }
@@ -46,6 +46,7 @@ export function Layout(props: { title: string; businesses: Business[]; selected:
             <a href={`/orders${q}`}>ออเดอร์ขาย</a>
             <a href={`/stock${q}`}>สต็อก</a>
             <a href={`/products${q}`}>รุ่นสินค้า</a>
+            <a href={`/reconcile${q}`}>จับคู่ยอดเงิน</a>
           </nav>
           <form method="get" style="margin-left:auto">
             <select name="b" onchange="this.form.submit()">
