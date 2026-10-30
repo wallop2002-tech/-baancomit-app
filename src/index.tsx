@@ -1,9 +1,9 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { Layout } from './views/layout'
-import { type Env, type Business, audit, baht, listBusinesses, placeholders, scopeIds, toSatang } from './db'
+import { type Env, type Business, audit, baht, listBusinesses, placeholders, scopeIds, stockOwner, stockScope, toSatang } from './db'
 
-type Vars = { businesses: Business[]; selected: number | null; scope: number[] }
+type Vars = { businesses: Business[]; selected: number | null; scope: number[]; stockScope: number[] }
 const app = new Hono<{ Bindings: Env; Variables: Vars }>()
 
 const PAYMENT_LABEL: Record<string, string> = {
@@ -22,6 +22,7 @@ app.use('*', async (c, next) => {
   c.set('businesses', businesses)
   c.set('selected', selected)
   c.set('scope', scopeIds(businesses, selected))
+  c.set('stockScope', stockScope(businesses, selected))
   await next()
 })
 
@@ -45,13 +46,16 @@ function back(path: string, selected: number | null, params: Record<string, stri
   return `${path}?${q}`
 }
 
-function BusinessSelect(props: { businesses: Business[]; selected: number | null }) {
+function BusinessSelect(props: { businesses: Business[]; selected: number | null; stock?: boolean }) {
+  // หน้าสต็อก/รุ่นสินค้าเลือกได้เฉพาะกิจการแม่ เพราะกิจการย่อยใช้สต็อกร่วม
+  const list = props.stock ? props.businesses.filter((b) => b.parent_id == null) : props.businesses
+  const selected = props.stock && props.selected != null ? stockOwner(props.businesses, props.selected) : props.selected
   return (
     <label>
       กิจการ
       <select name="business_id" required>
-        {props.businesses.map((b) => (
-          <option value={String(b.id)} selected={props.selected === b.id}>
+        {list.map((b) => (
+          <option value={String(b.id)} selected={selected === b.id}>
             {b.parent_id ? '— ' : ''}
             {b.name}
           </option>
@@ -100,7 +104,7 @@ app.get('/', async (c) => {
 
 // ---------- รุ่นสินค้า ----------
 app.get('/products', async (c) => {
-  const scope = c.get('scope')
+  const scope = c.get('stockScope')
   const { results } = await c.env.DB.prepare(
     `SELECT p.id, p.code, p.spec, p.list_price_satang, b.name business,
             (SELECT COUNT(*) FROM serial_units u WHERE u.product_id = p.id AND u.status = 'in_stock') in_stock
@@ -114,7 +118,7 @@ app.get('/products', async (c) => {
       <div class="card">
         <h3>เพิ่มรุ่น</h3>
         <form class="inline" method="post" action="/products">
-          <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} />
+          <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} stock />
           <label>Product_ID<input name="code" required placeholder="Ti3B35" /></label>
           <label>สเปค<input name="spec" placeholder="Acer P214 Ci5 Gen11 R8 ssd256" /></label>
           <label>ราคาตั้ง (บาท)<input name="list_price" inputmode="decimal" /></label>
@@ -138,7 +142,7 @@ app.post('/products', async (c) => {
   const sel = c.get('selected')
   try {
     const r = await c.env.DB.prepare('INSERT INTO products (business_id, code, spec, list_price_satang) VALUES (?, ?, ?, ?)')
-      .bind(Number(f.business_id), f.code.trim(), f.spec ?? '', toSatang(f.list_price))
+      .bind(stockOwner(c.get('businesses'), Number(f.business_id)), f.code.trim(), f.spec ?? '', toSatang(f.list_price))
       .run()
     await audit(c.env.DB, 'products', r.meta.last_row_id, 'create', f)
     return c.redirect(back('/products', sel, { ok: `เพิ่มรุ่น ${f.code} แล้ว` }))
@@ -149,7 +153,7 @@ app.post('/products', async (c) => {
 
 // ---------- สต็อก ----------
 app.get('/stock', async (c) => {
-  const scope = c.get('scope')
+  const scope = c.get('stockScope')
   const status = c.req.query('status') ?? 'in_stock'
   const { results } = await c.env.DB.prepare(
     `SELECT u.serial, u.status, u.received_at, u.supplier, u.cost_satang, p.code, p.spec, b.name business
@@ -164,7 +168,7 @@ app.get('/stock', async (c) => {
       <div class="card">
         <h3>รับเครื่องเข้า</h3>
         <form class="inline" method="post" action="/stock/in">
-          <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} />
+          <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} stock />
           <label>Product_ID<input name="product_code" required /></label>
           <label>Serial (คั่นด้วยเว้นวรรคหรือขึ้นบรรทัด)<input name="serials" required /></label>
           <label>ต้นทุน/เครื่อง (บาท)<input name="cost" inputmode="decimal" /></label>
@@ -206,7 +210,7 @@ app.get('/stock', async (c) => {
 app.post('/stock/in', async (c) => {
   const f = await c.req.parseBody<Record<string, string>>()
   const sel = c.get('selected')
-  const businessId = Number(f.business_id)
+  const businessId = stockOwner(c.get('businesses'), Number(f.business_id))
   const product = await c.env.DB.prepare('SELECT id FROM products WHERE business_id = ? AND code = ?')
     .bind(businessId, f.product_code.trim())
     .first<{ id: number }>()
@@ -229,7 +233,7 @@ app.post('/stock/in', async (c) => {
 app.post('/stock/out', async (c) => {
   const f = await c.req.parseBody<Record<string, string>>()
   const sel = c.get('selected')
-  const scope = c.get('scope')
+  const scope = c.get('stockScope')
   const unit = await c.env.DB.prepare(`SELECT id, status FROM serial_units WHERE serial = ? AND business_id IN (${placeholders(scope.length)})`)
     .bind(f.serial.trim(), ...scope)
     .first<{ id: number; status: string }>()
@@ -315,15 +319,17 @@ app.post('/orders', async (c) => {
   const price = toSatang(f.price)
   if (price == null) return c.redirect(back('/orders', sel, { err: 'ราคาขายไม่ถูกต้อง' }))
 
+  // ขายในนามกิจการย่อย แต่ตัดจากสต็อกของกิจการแม่
+  const owner = stockOwner(c.get('businesses'), businessId)
   const product = await db.prepare('SELECT id FROM products WHERE business_id = ? AND code = ?')
-    .bind(businessId, f.product_code.trim())
+    .bind(owner, f.product_code.trim())
     .first<{ id: number }>()
   if (!product) return c.redirect(back('/orders', sel, { err: `ไม่พบรุ่น ${f.product_code} ในกิจการนี้` }))
 
   let unit: { id: number; status: string } | null = null
   if (f.serial?.trim()) {
     unit = await db.prepare('SELECT id, status FROM serial_units WHERE business_id = ? AND serial = ? AND product_id = ?')
-      .bind(businessId, f.serial.trim(), product.id)
+      .bind(owner, f.serial.trim(), product.id)
       .first()
     if (!unit) return c.redirect(back('/orders', sel, { err: `ไม่พบ Serial ${f.serial} ของรุ่นนี้` }))
     if (unit.status !== 'in_stock' && unit.status !== 'reserved') return c.redirect(back('/orders', sel, { err: `Serial ${f.serial} สถานะ ${unit.status} ขายไม่ได้` }))
