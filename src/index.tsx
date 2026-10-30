@@ -1,70 +1,22 @@
 import { Hono } from 'hono'
-import type { Context } from 'hono'
-import { Layout } from './views/layout'
 import { parseBankPaste, parseCodPaste } from './reconcile'
-import { type Env, type Business, audit, baht, listBusinesses, placeholders, scopeIds, stockOwner, stockScope, toSatang } from './db'
+import { audit, baht, placeholders, stockOwner, toSatang } from './db'
+import { type AppEnv, BusinessSelect, PAYMENT_LABEL, back, page } from './ui'
+import { access } from './auth'
+import { reports } from './routes/reports'
+import { claims } from './routes/claims'
+import { installments } from './routes/installments'
+import { users } from './routes/users'
+import { api } from './routes/api'
 
-type Vars = { businesses: Business[]; selected: number | null; scope: number[]; stockScope: number[] }
-const app = new Hono<{ Bindings: Env; Variables: Vars }>()
+const app = new Hono<AppEnv>()
 
-const PAYMENT_LABEL: Record<string, string> = {
-  transfer: 'โอน',
-  cod: 'COD',
-  cash: 'สด',
-  installment: 'ผ่อน',
-  mixed: 'ผสม',
-}
+// API สำหรับระบบภายนอกใช้ token ของตัวเอง ไม่ผ่านล็อกอินพนักงาน
+app.route('/api', api)
 
-// โหลดรายชื่อกิจการและขอบเขตที่เลือก (?b=) ให้ทุกหน้า
-app.use('*', async (c, next) => {
-  const businesses = await listBusinesses(c.env.DB)
-  const raw = Number(c.req.query('b'))
-  const selected = businesses.some((b) => b.id === raw) ? raw : null
-  c.set('businesses', businesses)
-  c.set('selected', selected)
-  c.set('scope', scopeIds(businesses, selected))
-  c.set('stockScope', stockScope(businesses, selected))
-  await next()
-})
+// ล็อกอิน สิทธิ์ และขอบเขตกิจการที่เลือก (?b=) ให้ทุกหน้า
+app.use('*', access)
 
-function page(c: Context<{ Bindings: Env; Variables: Vars }>, title: string, body: any) {
-  return c.html(
-    <Layout
-      title={title}
-      businesses={c.get('businesses')}
-      selected={c.get('selected')}
-      flash={c.req.query('ok')}
-      error={c.req.query('err')}
-    >
-      {body}
-    </Layout>,
-  )
-}
-
-function back(path: string, selected: number | null, params: Record<string, string>) {
-  const q = new URLSearchParams(params)
-  if (selected) q.set('b', String(selected))
-  return `${path}?${q}`
-}
-
-function BusinessSelect(props: { businesses: Business[]; selected: number | null; stock?: boolean }) {
-  // หน้าสต็อก/รุ่นสินค้าเลือกได้เฉพาะกิจการแม่ เพราะกิจการย่อยใช้สต็อกร่วม
-  const list = props.stock ? props.businesses.filter((b) => b.parent_id == null) : props.businesses
-  const selected = props.stock && props.selected != null ? stockOwner(props.businesses, props.selected) : props.selected
-  return (
-    <label>
-      กิจการ
-      <select name="business_id" required>
-        {list.map((b) => (
-          <option value={String(b.id)} selected={selected === b.id}>
-            {b.parent_id ? '— ' : ''}
-            {b.name}
-          </option>
-        ))}
-      </select>
-    </label>
-  )
-}
 
 // ---------- ภาพรวม ----------
 app.get('/', async (c) => {
@@ -143,7 +95,7 @@ app.post('/products', async (c) => {
   const sel = c.get('selected')
   try {
     const r = await c.env.DB.prepare('INSERT INTO products (business_id, code, spec, list_price_satang) VALUES (?, ?, ?, ?)')
-      .bind(stockOwner(c.get('businesses'), Number(f.business_id)), f.code.trim(), f.spec ?? '', toSatang(f.list_price))
+      .bind(stockOwner(c.get('allBusinesses'), Number(f.business_id)), f.code.trim(), f.spec ?? '', toSatang(f.list_price))
       .run()
     await audit(c.env.DB, 'products', r.meta.last_row_id, 'create', f)
     return c.redirect(back('/products', sel, { ok: `เพิ่มรุ่น ${f.code} แล้ว` }))
@@ -211,7 +163,7 @@ app.get('/stock', async (c) => {
 app.post('/stock/in', async (c) => {
   const f = await c.req.parseBody<Record<string, string>>()
   const sel = c.get('selected')
-  const businessId = stockOwner(c.get('businesses'), Number(f.business_id))
+  const businessId = stockOwner(c.get('allBusinesses'), Number(f.business_id))
   const product = await c.env.DB.prepare('SELECT id FROM products WHERE business_id = ? AND code = ?')
     .bind(businessId, f.product_code.trim())
     .first<{ id: number }>()
@@ -321,7 +273,7 @@ app.post('/orders', async (c) => {
   if (price == null) return c.redirect(back('/orders', sel, { err: 'ราคาขายไม่ถูกต้อง' }))
 
   // ขายในนามกิจการย่อย แต่ตัดจากสต็อกของกิจการแม่
-  const owner = stockOwner(c.get('businesses'), businessId)
+  const owner = stockOwner(c.get('allBusinesses'), businessId)
   const product = await db.prepare('SELECT id FROM products WHERE business_id = ? AND code = ?')
     .bind(owner, f.product_code.trim())
     .first<{ id: number }>()
@@ -525,13 +477,9 @@ app.post('/reconcile/confirm', async (c) => {
   return c.redirect(back('/reconcile', sel, { ok: `จับคู่เงิน ${baht(txn.amount_satang)} กับออเดอร์ #${orderId} แล้ว` }))
 })
 
-// ---------- API สำหรับระบบอื่น ----------
-app.get('/api/serials/:serial', async (c) => {
-  const row = await c.env.DB.prepare(
-    `SELECT u.serial, u.status, p.code product, p.spec, b.code business FROM serial_units u
-     JOIN products p ON p.id = u.product_id JOIN businesses b ON b.id = u.business_id WHERE u.serial = ?`,
-  ).bind(c.req.param('serial')).all()
-  return c.json(row.results)
-})
+app.route('/', reports)
+app.route('/', claims)
+app.route('/', installments)
+app.route('/', users)
 
 export default app

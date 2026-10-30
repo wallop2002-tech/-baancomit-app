@@ -1,4 +1,12 @@
-export type Env = { DB: D1Database }
+export type Env = {
+  DB: D1Database
+  // Cloudflare Access: โดเมนทีม (เช่น baancomit.cloudflareaccess.com) และ Application Audience (AUD) tag
+  ACCESS_TEAM_DOMAIN?: string
+  ACCESS_AUD?: string
+  // token สำหรับระบบภายนอกที่เรียก /api
+  API_TOKEN?: string
+  DEV_TRUST_EMAIL_HEADER?: string
+}
 
 export type Business = { id: number; parent_id: number | null; code: string; name: string }
 
