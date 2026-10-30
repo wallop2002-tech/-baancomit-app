@@ -1,0 +1,328 @@
+// แปลงข้อมูลปี 2026 จาก 3 ชีตเดิมเป็นคำสั่ง SQL สำหรับ D1
+// ใช้ได้ทั้งสคริปต์บนเครื่อง (scripts/import.ts) และหน้า "นำเข้าข้อมูล" ในแอป (ประมวลผลในเบราว์เซอร์)
+// รันซ้ำได้: ทุกแถวมี legacy_key และใช้ INSERT OR IGNORE
+
+import { toSatang } from './money'
+import { parseBankPaste, parseCodPaste } from './reconcile'
+
+const YEAR = 2026
+const BCI = 1 // บ้านคอมไอที เจ้าของสต็อก
+const ORDER_TABS = [
+  { file: 'สมุดโอนครบ - วีแคร์ยู', business: 4, code: 'WCY' },
+  { file: 'สมุดโอนครบ - KhunNoi', business: 5, code: 'NOI' },
+]
+const BANK_TABS = [
+  { file: 'สมุดโอนครบ - กสิกร', business: 4, account: 'KBANK-WCY', keyCol: 20 },
+  { file: 'สมุดโอนครบ - BankNoi', business: 5, account: 'BANK-NOI', keyCol: 16 },
+]
+const COD_TABS = ['สมุดโอนครบ - COD_WCY', 'สมุดโอนครบ - COD_Noi']
+const SALES_TABS = ['เซลล์ทีม_1', 'เซลล์ทีม_2', 'เซลล์ทีม_3', 'เซลล์ทีม_4', 'ร้าน', 'ADS'].map((t) => `จดยอดขายเซลล์ - ${t}`)
+const INSTALLMENT_TAB = 'จดยอดขายเซลล์ - ผ่อน'
+// ทีม X ในชีตคือหน้าร้าน ซึ่งสมุดโอนครบลงไว้ในแท็บคุณหน่อย ทีมอื่นเป็นของวีแคร์ยู
+const isStoreFront = (team: string) => team.trim().toUpperCase() === 'X'
+const salesBusiness = (team: string) => (isStoreFront(team) ? 5 : 4)
+const teamLabel = (team: string) => (isStoreFront(team) ? 'หน้าร้าน' : `ทีม ${team}`)
+const OUR_BUSINESSES = new Set(['ไนซ์ไอที', 'นายไอที', 'บ้านคอมไอที', 'BAANCOMIT'])
+
+// ---------- CSV ----------
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++ }
+      else if (ch === '"') quoted = false
+      else cell += ch
+    } else if (ch === '"') quoted = true
+    else if (ch === ',') { row.push(cell); cell = '' }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++
+      row.push(cell); rows.push(row); row = []; cell = ''
+    } else cell += ch
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row) }
+  return rows
+}
+
+export type TabReader = (name: string) => string[][] | null
+
+// ---------- ค่า ----------
+const q = (v: string | number | null | undefined) =>
+  v == null || v === '' ? 'NULL' : typeof v === 'number' ? String(v) : `'${String(v).replace(/'/g, "''")}'`
+const money = (s: string | undefined) => toSatang(s) ?? 0
+const pad = (n: number | string) => String(n).padStart(2, '0')
+
+// "27/7" หรือ "27/7, 15:49" หรือ "6/2/2026, 11:00:44" → YYYY-MM-DD
+export function dayMonth(s: string | undefined, year: number): string | null {
+  const m = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/.exec((s ?? '').trim())
+  if (!m) return null
+  return `${m[3] ?? year}-${pad(m[2])}-${pad(m[1])}`
+}
+
+function dateTime(s: string | undefined): string | null {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec((s ?? '').trim())
+  if (!m) return dayMonth(s, YEAR)
+  return `${m[3]}-${pad(m[2])}-${pad(m[1])}T${pad(m[4])}:${m[5]}:${m[6] ?? '00'}`
+}
+
+// Keyเช็คโอน = yymmddHHMM + ยอดเงิน เช่น 260727194315900 → ปี 2026
+// KEY ของชีตจดยอดขายเซลล์ เช่น 01121PakornTipa = วันที่ 01 เดือน 12 ทีม 1 + ชื่อไม่มีช่องว่าง 10 ตัว
+export function saleKey(isoDate: string, team: string, name: string): string {
+  return `${isoDate.slice(8, 10)}${isoDate.slice(5, 7)}${team}${[...name.replace(/\s+/g, '')].slice(0, 10).join('')}`
+}
+
+// แท็บที่มีแค่ วว/ดด เรียงตามเวลา: ไล่จากแถวล่างสุดขึ้นไป ถ้าเดือนกระโดดขึ้น 3 เดือนขึ้นไปแปลว่าข้ามไปปีก่อน
+// (ยอมให้แถวสลับกันเล็กน้อยช่วงปลายเดือน) แถวล่างสุดเป็นปีนี้ ถ้าเดือนยังไม่เกินเดือนปัจจุบัน
+export function withYears(dates: (string | undefined)[], thisYear: number, thisMonth = new Date().getMonth() + 1): (string | null)[] {
+  const parsed = dates.map((d) => /^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/.exec((d ?? '').trim()))
+  const result: (string | null)[] = parsed.map(() => null)
+  let year: number | null = null
+  let next = 0
+  for (let i = parsed.length - 1; i >= 0; i--) {
+    const m = parsed[i]
+    if (!m) continue
+    const month = Number(m[2])
+    if (m[3]) year = Number(m[3])
+    else if (year == null) year = month <= thisMonth ? thisYear : thisYear - 1
+    else if (month >= next + 3) year--
+    next = month
+    result[i] = `${m[3] ?? year}-${pad(m[2])}-${pad(m[1])}`
+  }
+  return result
+}
+
+export function keyYear(key: string | undefined): number | null {
+  return /^\d{11,}$/.test(key ?? '') ? 2000 + Number(key!.slice(0, 2)) : null
+}
+
+export function carrierOf(tracking: string): string {
+  if (/^[A-Z]{2}\d{9}TH$/.test(tracking)) return 'ไปรษณีย์'
+  if (/^SHP|^KER/i.test(tracking)) return 'Kerry'
+  return 'Flash'
+}
+
+// ---------- สร้าง SQL ----------
+export function buildSql(readTab: TabReader): { statements: string[]; sql: string; counts: Record<string, number> } {
+  const out: string[] = []
+  const counts: Record<string, number> = {}
+  const bump = (k: string) => (counts[k] = (counts[k] ?? 0) + 1)
+  const unit = (serial: string) => `(SELECT id FROM serial_units WHERE business_id = ${BCI} AND serial = ${q(serial)})`
+  const order = (key: string) => `(SELECT id FROM orders WHERE legacy_key = ${q(key)})`
+
+  // สต็อก: รุ่นและเครื่องทีละ Serial
+  const stockOut = new Map<string, { kind: string; dest: string; at: string | null; row: number }>()
+  for (const [i, r] of (readTab('IT_STOCK_SYSTEM - STOCK_OUT') ?? []).slice(1).entries()) {
+    if (r[1]) stockOut.set(r[1].trim(), { kind: r[4] ?? '', dest: r[5] ?? '', at: dateTime(r[0]), row: i + 2 })
+  }
+  const products = new Set<string>()
+  for (const r of (readTab('IT_STOCK_SYSTEM - MASTER_STOCK') ?? []).slice(1)) {
+    const [code, spec, cost, price, supplier, , serial, status, dateIn, note, lot] = r.map((s) => (s ?? '').trim())
+    if (!code || !serial) continue
+    if (!products.has(code)) {
+      products.add(code)
+      out.push(`INSERT OR IGNORE INTO products (business_id, code, spec, list_price_satang) VALUES (${BCI}, ${q(code)}, ${q(spec)}, ${q(toSatang(price))});`)
+      bump('products')
+    }
+    const so = stockOut.get(serial)
+    let st = { IN: 'in_stock', RESERVED: 'reserved', CLAIMING: 'claim', RETURNED: 'transferred' }[status] ?? 'sold'
+    if (status === 'OUT' && so) {
+      if (so.kind === 'ขาย' && !OUR_BUSINESSES.has(so.dest)) st = 'sold'
+      else if (so.kind === 'ขาย') st = 'transferred'
+      else if (so.kind.startsWith('คืน')) st = 'transferred'
+      else st = 'internal'
+    }
+    const noteText = [note, status === 'RETURNED' ? 'คืนซัพพลายเออร์' : ''].filter(Boolean).join(' · ')
+    out.push(
+      `INSERT OR IGNORE INTO serial_units (business_id, product_id, serial, cost_satang, supplier, lot_no, status, received_at, note) VALUES (${BCI}, (SELECT id FROM products WHERE business_id = ${BCI} AND code = ${q(code)}), ${q(serial)}, ${q(toSatang(cost))}, ${q(supplier)}, ${q(Number(lot) || null)}, '${st}', ${q(dateTime(dateIn) ?? `${YEAR}-01-01`)}, ${q(noteText)});`,
+    )
+    bump('serial_units')
+    if (so) {
+      const kind = so.kind === 'ขาย' && !OUR_BUSINESSES.has(so.dest) ? 'sale' : so.kind.startsWith('คืน') ? 'return' : so.kind === 'ขาย' ? 'transfer' : 'internal'
+      out.push(`INSERT OR IGNORE INTO stock_movements (unit_id, kind, destination, moved_at, legacy_key) VALUES (${unit(serial)}, '${kind}', ${q(so.dest)}, ${q(so.at)}, ${q(`STOCK_OUT:${so.row}`)});`)
+      bump('stock_movements')
+    }
+  }
+
+  // ออเดอร์จากสมุดโอนครบ (แถวที่ 1-2 เป็นหัวตาราง)
+  for (const tab of ORDER_TABS) {
+    const rows = readTab(tab.file)
+    if (!rows) continue
+    const header = rows[1] ?? []
+    if (header[2] !== 'เลขFlash' || header[33] !== 'Product_ID') throw new Error(`หัวตาราง ${tab.file} ไม่ตรงรูปแบบที่คาด`)
+    const hasRealName = header[6] === 'ชื่อจริง'
+    for (const [i, r0] of rows.slice(2).entries()) {
+      const r = r0.map((s) => (s ?? '').trim())
+      const model = r[33] || r[0]
+      if (!model || !r[5]) continue
+      const year = keyYear(r[9]) ?? keyYear(r[15]) ?? YEAR
+      if (year !== YEAR) { bump('ข้ามแถวปีอื่น'); continue }
+      const soldOn = dayMonth(r[4], year) ?? dayMonth(r[12], year)
+      if (!soldOn) { bump('ข้ามแถวไม่มีวันที่'); continue }
+      const key = `${tab.code}:${i + 3}`
+      const transfer = money(r[11]), extra = money(r[17]), cod = money(r[13]), cash = money(r[21])
+      const total = money(r[20]) || transfer + extra + cod + cash || money(r[27])
+      const paymentType = cod && (transfer || extra) ? 'mixed' : cod ? 'cod' : cash && !transfer ? 'cash' : 'transfer'
+      const codPaid = cod > 0 && !!r[14]
+      const paid = (codPaid ? cod : 0) + transfer + extra + cash
+      const status = /ไม่รับ|ตีกลับ|ยกเลิก/.test(r[19]) ? 'returned' : total > 0 && paid >= total ? 'paid' : r[2] ? 'shipped' : 'open'
+
+      out.push(`INSERT OR IGNORE INTO customers (facebook_name, full_name, legacy_key) VALUES (${q(r[5])}, ${q(hasRealName ? r[6] : null)}, ${q(key)});`)
+      if (r[8]) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${tab.business}, ${q(teamLabel(r[8]))});`)
+      out.push(
+        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) VALUES (${tab.business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${r[8] ? `(SELECT id FROM teams WHERE business_id = ${tab.business} AND name = ${q(teamLabel(r[8]))})` : 'NULL'}, '${soldOn}', ${q(r[7])}, ${total}, ${q(toSatang(r[25]))}, '${paymentType}', '${status}', ${q([r[19], r[29]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(saleKey(soldOn, r[8], r[5]))});`,
+      )
+      bump(`orders ${tab.code}`)
+
+      out.push(`INSERT OR IGNORE INTO products (business_id, code) VALUES (${BCI}, ${q(model)});`)
+      const serial = r[31]
+      out.push(
+        `INSERT OR IGNORE INTO order_items (order_id, product_id, unit_id, price_satang, legacy_key) VALUES (${order(key)}, (SELECT id FROM products WHERE business_id = ${BCI} AND code = ${q(model)}), ${serial ? unit(serial) : 'NULL'}, ${total}, ${q(key)});`,
+      )
+      if (serial) {
+        out.push(`UPDATE serial_units SET status = 'sold' WHERE id = ${unit(serial)} AND status IN ('in_stock', 'reserved');`)
+        out.push(`INSERT OR IGNORE INTO stock_movements (unit_id, kind, order_id, moved_at, legacy_key) SELECT ${unit(serial)}, 'sale', ${order(key)}, ${q(dateTime(r[32]) ?? soldOn)}, ${q(`sale:${key}`)} WHERE ${unit(serial)} IS NOT NULL;`)
+      }
+
+      if (/^([A-Z]{2}[A-Z0-9]{8,}|\d{12,})$/.test(r[2])) {
+        out.push(`INSERT OR IGNORE INTO shipments (order_id, carrier, tracking_no, invoice_no, shipped_on, cod_satang, status) VALUES (${order(key)}, '${carrierOf(r[2])}', ${q(r[2])}, ${q(r[3])}, '${soldOn}', ${cod}, '${codPaid ? 'cod_settled' : status === 'returned' ? 'returned' : 'shipped'}');`)
+        bump('shipments')
+      }
+
+      // เงินเข้า: Keyเช็คโอน ตรงกับ Keyโอน ของ statement จึงผูกกับแถวธนาคารได้ทันที
+      const pay = (kind: string, amount: number, on: string | null, bankKey: string | null, suffix: string) => {
+        if (!amount) return
+        out.push(
+          `INSERT OR IGNORE INTO payments (order_id, kind, amount_satang, paid_on, match_status, legacy_key) VALUES (${order(key)}, '${kind}', ${amount}, '${on ?? soldOn}', 'confirmed', ${q(`${key}:${suffix}`)});`,
+        )
+        if (bankKey) out.push(`UPDATE payments SET bank_txn_id = (SELECT id FROM bank_transactions WHERE ref_code = ${q(bankKey)} LIMIT 1) WHERE legacy_key = ${q(`${key}:${suffix}`)};`)
+        bump('payments')
+      }
+      pay('transfer', transfer, dayMonth(r[12], year), r[9] || null, 'transfer')
+      pay('extra_transfer', extra, dayMonth(r[18], year), r[15] || null, 'extra')
+      pay('cash', cash, soldOn, null, 'cash')
+      if (codPaid) pay('cod', cod, dayMonth(r[14], year), null, 'cod')
+    }
+  }
+
+  // ยอดขายจากแท็บเซลล์ทีม ที่ยังไม่มีในสมุดโอนครบ (เช่น รับหน้าร้าน) จับซ้ำด้วย KEY
+  for (const file of SALES_TABS) {
+    const rows = readTab(file)
+    if (!rows) continue
+    const body = rows.slice(1)
+    const dates = withYears(body.map((r) => r[0]), YEAR)
+    for (const [i, r0] of body.entries()) {
+      const r = r0.map((s) => (s ?? '').trim())
+      const [, name, model, price, house, team, transferred, cod, installment] = r
+      const soldOn = dates[i]
+      if (!name || !model || !soldOn) continue
+      if (!soldOn.startsWith(String(YEAR))) { bump('ข้ามแถวปีอื่น'); continue }
+      const business = salesBusiness(team)
+      const key = `SALE:${file.split(' - ')[1]}:${i + 2}`
+      const sk = r[12] || saleKey(soldOn, team, name)
+      const total = money(price)
+      const paid = money(transferred)
+      const paymentType = money(cod) ? 'cod' : money(installment) ? 'installment' : 'transfer'
+      const teamName = team ? teamLabel(team) : null
+      const fresh = `NOT EXISTS (SELECT 1 FROM orders WHERE sale_key = ${q(sk)} AND legacy_key != ${q(key)})`
+      out.push(`INSERT OR IGNORE INTO customers (facebook_name, legacy_key) SELECT ${q(name)}, ${q(key)} WHERE ${fresh};`)
+      if (teamName) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${business}, ${q(teamName)});`)
+      out.push(
+        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) SELECT ${business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${teamName ? `(SELECT id FROM teams WHERE business_id = ${business} AND name = ${q(teamName)})` : 'NULL'}, '${soldOn}', ${q(house)}, ${total}, ${q(toSatang(r[14]))}, '${paymentType}', '${total > 0 && paid >= total ? 'paid' : 'open'}', ${q([file.split(' - ')[1], r[11]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(sk)} WHERE ${fresh};`,
+      )
+      out.push(`INSERT OR IGNORE INTO products (business_id, code) VALUES (${BCI}, ${q(model)});`)
+      out.push(`INSERT OR IGNORE INTO order_items (order_id, product_id, price_satang, legacy_key) SELECT ${order(key)}, (SELECT id FROM products WHERE business_id = ${BCI} AND code = ${q(model)}), ${total}, ${q(key)} WHERE ${order(key)} IS NOT NULL;`)
+      if (paid) out.push(`INSERT OR IGNORE INTO payments (order_id, kind, amount_satang, paid_on, match_status, legacy_key) SELECT ${order(key)}, 'transfer', ${paid}, '${soldOn}', 'confirmed', ${q(`${key}:transfer`)} WHERE ${order(key)} IS NOT NULL;`)
+      bump('แถวเซลล์ทีม (สร้างออเดอร์ใหม่เฉพาะที่ไม่ซ้ำ)')
+    }
+  }
+
+  // แผนผ่อน: ผูกกับออเดอร์ด้วย KEYSALE ถ้าไม่พบให้สร้างออเดอร์ผ่อนขึ้นมา
+  for (const [i, r0] of (readTab(INSTALLMENT_TAB) ?? []).slice(1).entries()) {
+    const r = r0.map((s) => (s ?? '').trim())
+    const [, phone, code, fb, fullName, model, startDm, full, status, closedDm, accumulated] = r
+    const importedAt = dateTime(r[13])
+    const year = Number(importedAt?.slice(0, 4))
+    if (!fb || !model || !importedAt) continue
+    if (year !== YEAR && status === 'ปิดส่ง') { bump('ข้ามแผนผ่อนที่ปิดแล้วก่อนปีนี้'); continue }
+    const startedOn = dayMonth(startDm, year) ?? importedAt.slice(0, 10)
+    const key = `INST:${i + 2}`
+    const team = r[17] ?? ''
+    const sk = r[18] || r[0]
+    out.push(`INSERT OR IGNORE INTO customers (facebook_name, full_name, phone, legacy_key) VALUES (${q(fb)}, ${q(fullName)}, ${q(phone)}, ${q(key)});`)
+    out.push(
+      `INSERT OR IGNORE INTO orders (business_id, customer_id, sold_on, price_satang, payment_type, status, note, legacy_key, sale_key) SELECT ${salesBusiness(team)}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), '${startedOn}', ${money(full)}, 'installment', 'open', 'ผ่อน', ${q(key)}, ${q(sk)} WHERE NOT EXISTS (SELECT 1 FROM orders WHERE sale_key = ${q(sk)} AND legacy_key != ${q(key)});`,
+    )
+    const target = `(SELECT id FROM orders WHERE sale_key = ${q(sk)} ORDER BY legacy_key = ${q(key)} LIMIT 1)`
+    out.push(
+      `INSERT OR IGNORE INTO installment_plans (order_id, customer_id, customer_code, full_price_satang, started_on, status, closed_on) SELECT ${target}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${q(code)}, ${money(full)}, '${startedOn}', '${status === 'ปิดส่ง' ? 'closed' : 'active'}', ${q(dayMonth(closedDm, year))} WHERE NOT EXISTS (SELECT 1 FROM installment_plans WHERE customer_code = ${q(code)} AND started_on = '${startedOn}');`,
+    )
+    if (money(accumulated)) out.push(`INSERT OR IGNORE INTO payments (order_id, kind, amount_satang, paid_on, match_status, legacy_key) VALUES (${target}, 'installment', ${money(accumulated)}, '${startedOn}', 'confirmed', ${q(`${key}:paid`)});`)
+    bump('แผนผ่อน')
+  }
+
+  // statement ธนาคาร: ใช้ตัวอ่านเดียวกับหน้าจับคู่ยอดเงิน แล้วเก็บ Keyโอน ไว้ใน ref_code
+  const bankSql: string[] = []
+  for (const tab of BANK_TABS) {
+    for (const r of readTab(tab.file) ?? []) {
+      const [row] = parseBankPaste(r.join('\t'))
+      if (!row || !row.txnAt.startsWith(String(YEAR))) continue
+      const key = r[tab.keyCol]?.trim() || `${row.txnAt.slice(2, 4)}${row.txnAt.slice(5, 7)}${row.txnAt.slice(8, 10)}${row.txnAt.slice(11, 13)}${row.txnAt.slice(14, 16)}${Math.floor(row.amount / 100)}`
+      bankSql.push(`INSERT OR IGNORE INTO bank_transactions (business_id, account, txn_at, amount_satang, description, ref_code, import_batch) VALUES (${tab.business}, '${tab.account}', '${row.txnAt}', ${row.amount}, ${q(row.description)}, ${q(key)}, 'import-${YEAR}');`)
+      bump('bank_transactions')
+    }
+  }
+
+  // รอบโอน COD: บันทึกค่าธรรมเนียม และปิดพัสดุที่สมุดยังไม่ได้ลงวันจ่าย
+  const codSql: string[] = []
+  for (const file of COD_TABS) {
+    for (const r of readTab(file) ?? []) {
+      const [row] = parseCodPaste(r.join('\t'))
+      if (!row || (row.depositOn && !row.depositOn.startsWith(String(YEAR)))) continue
+      codSql.push(`UPDATE shipments SET cod_fee_satang = ${row.fee}, status = 'cod_settled' WHERE tracking_no = ${q(row.tracking)};`)
+      codSql.push(
+        `INSERT OR IGNORE INTO payments (order_id, kind, amount_satang, paid_on, shipment_id, match_status, legacy_key) SELECT s.order_id, 'cod', ${row.cod}, ${q(row.depositOn)}, s.id, 'confirmed', ${q(`cod:${row.tracking}`)} FROM shipments s WHERE s.tracking_no = ${q(row.tracking)} AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.order_id = s.order_id AND p.kind = 'cod');`,
+      )
+      bump('cod rows')
+    }
+  }
+
+  // เคลม
+  for (const [i, r0] of (readTab('IT_STOCK_SYSTEM - CLAIM_CUST') ?? []).slice(1).entries()) {
+    const r = r0.map((s) => (s ?? '').trim())
+    if (!r[1]) continue
+    out.push(
+      `INSERT OR IGNORE INTO claims (unit_id, direction, symptom, destination, sent_on, sent_tracking, received_back_on, returned_to_customer_on, return_tracking, legacy_key) SELECT ${unit(r[1])}, 'customer', ${q(r[4])}, ${q(r[5])}, ${q(dateTime(r[0]))}, ${q(r[7])}, ${q(dayMonth(r[12], YEAR))}, ${q(dayMonth(r[13], YEAR))}, ${q(r[14])}, ${q(`CLAIM_CUST:${i + 2}`)} WHERE ${unit(r[1])} IS NOT NULL;`,
+    )
+    bump('claims')
+  }
+  for (const [i, r0] of (readTab('IT_STOCK_SYSTEM - CLAIM_OUT') ?? []).slice(1).entries()) {
+    const r = r0.map((s) => (s ?? '').trim())
+    if (!r[1]) continue
+    out.push(
+      `INSERT OR IGNORE INTO claims (unit_id, direction, symptom, destination, sent_on, legacy_key) SELECT ${unit(r[1])}, 'supplier', ${q(r[4])}, ${q(r[5])}, ${q(dateTime(r[0]))}, ${q(`CLAIM_OUT:${i + 2}`)} WHERE ${unit(r[1])} IS NOT NULL;`,
+    )
+    bump('claims')
+  }
+
+  // ธนาคารต้องเข้าก่อนออเดอร์ เพื่อให้การผูก Keyโอน หาแถวเจอ ส่วน COD ต้องตามหลังพัสดุ
+  const stockEnd = out.findIndex((s) => s.startsWith('INSERT OR IGNORE INTO customers'))
+  const ordered = stockEnd < 0 ? [...bankSql, ...out, ...codSql] : [...out.slice(0, stockEnd), ...bankSql, ...out.slice(stockEnd), ...codSql]
+  // ออเดอร์ที่ได้เงินครบหลังรวม COD แล้ว
+  ordered.push(
+    `UPDATE orders SET status = 'paid' WHERE legacy_key IS NOT NULL AND status IN ('open', 'shipped') AND price_satang > 0 AND price_satang <= (SELECT COALESCE(SUM(amount_satang), 0) FROM payments p WHERE p.order_id = orders.id AND p.match_status = 'confirmed');`,
+  )
+  return { statements: ordered, sql: ordered.join('\n') + '\n', counts }
+}
+
+
+// แท็บที่ต้องใช้จากแต่ละชีต (ชื่อชีตตรงกับชื่อไฟล์ใน Google Sheets)
+export const SOURCE_TABS: Record<string, string[]> = {
+  IT_STOCK_SYSTEM: ['MASTER_STOCK', 'STOCK_OUT', 'CLAIM_CUST', 'CLAIM_OUT'],
+  สมุดโอนครบ: ['วีแคร์ยู', 'KhunNoi', 'กสิกร', 'BankNoi', 'COD_WCY', 'COD_Noi'],
+  จดยอดขายเซลล์: ['เซลล์ทีม_1', 'เซลล์ทีม_2', 'เซลล์ทีม_3', 'เซลล์ทีม_4', 'ร้าน', 'ADS', 'ผ่อน'],
+}
+// ชีตแต่ละไฟล์มีแท็บซ้ำชื่อกันได้ (เช่น BankNoi, MASTER_STOCK) จึงระบุไฟล์จากแท็บที่มีเฉพาะไฟล์นั้น
+export const SOURCE_SIGNATURE: Record<string, string> = { IT_STOCK_SYSTEM: 'STOCK_OUT', สมุดโอนครบ: 'COD_WCY', จดยอดขายเซลล์: 'เซลล์ทีม_1' }

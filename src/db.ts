@@ -11,14 +11,7 @@ export type Env = {
 export type Business = { id: number; parent_id: number | null; code: string; name: string }
 
 // รับเงินบาทจากฟอร์ม ("4,490" หรือ "4490.50") แล้วคืนเป็นสตางค์
-export function toSatang(input: string | undefined | null): number | null {
-  if (input == null) return null
-  const cleaned = String(input).replace(/,/g, '').trim()
-  if (cleaned === '') return null
-  const n = Number(cleaned)
-  if (!Number.isFinite(n)) return null
-  return Math.round(n * 100)
-}
+export { toSatang } from './money'
 
 export function baht(satang: number | null | undefined): string {
   if (satang == null) return '-'
