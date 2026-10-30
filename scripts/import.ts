@@ -26,8 +26,10 @@ const BANK_TABS = [
 const COD_TABS = ['สมุดโอนครบ - COD_WCY', 'สมุดโอนครบ - COD_Noi']
 const SALES_TABS = ['เซลล์ทีม_1', 'เซลล์ทีม_2', 'เซลล์ทีม_3', 'เซลล์ทีม_4', 'ร้าน', 'ADS'].map((t) => `จดยอดขายเซลล์ - ${t}`)
 const INSTALLMENT_TAB = 'จดยอดขายเซลล์ - ผ่อน'
-// ทีม X คือยอดของคุณหน่อย ทีมอื่นเป็นของวีแคร์ยู
-const salesBusiness = (team: string) => (team.toUpperCase() === 'X' ? 5 : 4)
+// ทีม X ในชีตคือหน้าร้าน ซึ่งสมุดโอนครบลงไว้ในแท็บคุณหน่อย ทีมอื่นเป็นของวีแคร์ยู
+const isStoreFront = (team: string) => team.trim().toUpperCase() === 'X'
+const salesBusiness = (team: string) => (isStoreFront(team) ? 5 : 4)
+const teamLabel = (team: string) => (isStoreFront(team) ? 'หน้าร้าน' : `ทีม ${team}`)
 const OUR_BUSINESSES = new Set(['ไนซ์ไอที', 'นายไอที', 'บ้านคอมไอที', 'BAANCOMIT'])
 
 // ---------- CSV ----------
@@ -181,9 +183,9 @@ export function buildSql(dir: string): { sql: string; counts: Record<string, num
       const status = /ไม่รับ|ตีกลับ|ยกเลิก/.test(r[19]) ? 'returned' : total > 0 && paid >= total ? 'paid' : r[2] ? 'shipped' : 'open'
 
       out.push(`INSERT OR IGNORE INTO customers (facebook_name, full_name, legacy_key) VALUES (${q(r[5])}, ${q(hasRealName ? r[6] : null)}, ${q(key)});`)
-      if (r[8]) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${tab.business}, ${q(`ทีม ${r[8]}`)});`)
+      if (r[8]) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${tab.business}, ${q(teamLabel(r[8]))});`)
       out.push(
-        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) VALUES (${tab.business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${r[8] ? `(SELECT id FROM teams WHERE business_id = ${tab.business} AND name = ${q(`ทีม ${r[8]}`)})` : 'NULL'}, '${soldOn}', ${q(r[7])}, ${total}, ${q(toSatang(r[25]))}, '${paymentType}', '${status}', ${q([r[19], r[29]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(saleKey(soldOn, r[8], r[5]))});`,
+        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) VALUES (${tab.business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${r[8] ? `(SELECT id FROM teams WHERE business_id = ${tab.business} AND name = ${q(teamLabel(r[8]))})` : 'NULL'}, '${soldOn}', ${q(r[7])}, ${total}, ${q(toSatang(r[25]))}, '${paymentType}', '${status}', ${q([r[19], r[29]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(saleKey(soldOn, r[8], r[5]))});`,
       )
       bump(`orders ${tab.code}`)
 
@@ -236,7 +238,7 @@ export function buildSql(dir: string): { sql: string; counts: Record<string, num
       const total = money(price)
       const paid = money(transferred)
       const paymentType = money(cod) ? 'cod' : money(installment) ? 'installment' : 'transfer'
-      const teamName = team ? `ทีม ${team}` : null
+      const teamName = team ? teamLabel(team) : null
       const fresh = `NOT EXISTS (SELECT 1 FROM orders WHERE sale_key = ${q(sk)} AND legacy_key != ${q(key)})`
       out.push(`INSERT OR IGNORE INTO customers (facebook_name, legacy_key) SELECT ${q(name)}, ${q(key)} WHERE ${fresh};`)
       if (teamName) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${business}, ${q(teamName)});`)
