@@ -1,0 +1,10 @@
+name = "baancomit-app"
+main = "src/index.tsx"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "baancomit-db"
+# ใส่ database_id ที่ได้จาก `npx wrangler d1 create baancomit-db`
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
