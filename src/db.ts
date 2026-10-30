@@ -32,6 +32,17 @@ export function scopeIds(all: Business[], selected: number | null): number[] {
   return ids
 }
 
+// สต็อกและรุ่นสินค้าเป็นของกิจการแม่ กิจการย่อยทุกตัวใช้กองเดียวกัน
+export function stockOwner(all: Business[], id: number): number {
+  let cur = all.find((b) => b.id === id)
+  while (cur?.parent_id != null) cur = all.find((b) => b.id === cur!.parent_id)
+  return cur?.id ?? id
+}
+
+export function stockScope(all: Business[], selected: number | null): number[] {
+  return selected == null ? all.map((b) => b.id) : scopeIds(all, stockOwner(all, selected))
+}
+
 export function placeholders(n: number): string {
   return Array(n).fill('?').join(',')
 }
