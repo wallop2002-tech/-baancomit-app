@@ -20,6 +20,7 @@ users.get('/users', async (c) => {
       <div class="card">
         <h3>เพิ่มผู้ใช้หรือสิทธิ์</h3>
         <p class="muted">ผู้ใช้ล็อกอินด้วยอีเมลผ่าน Cloudflare Access สิทธิ์ในกิจการแม่ครอบคลุมกิจการย่อย คนแรกที่เพิ่มควรเป็นเจ้าของ</p>
+        <p><a href="/import">นำเข้าข้อมูลจาก Google Sheets</a></p>
         <form class="inline" method="post" action={`/users${q}`}>
           <label>อีเมล<input type="email" name="email" required /></label>
           <label>ชื่อ<input name="name" required /></label>

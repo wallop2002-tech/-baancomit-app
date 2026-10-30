@@ -4,3 +4,4 @@ node_modules/
 *.csv
 import-data/
 *.import.sql
+public/static/

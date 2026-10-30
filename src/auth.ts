@@ -8,6 +8,7 @@ const ALL_ROLES: Role[] = ['owner', 'accounting', 'sales', 'stock']
 // บทบาทที่เข้าแต่ละหน้าได้ (owner เข้าได้ทุกหน้า) หน้าที่ไม่อยู่ในรายการ ทุกบทบาทดูได้
 const RULES: { method?: string; prefix: string; roles: Role[] }[] = [
   { prefix: '/users', roles: ['owner'] },
+  { prefix: '/import', roles: ['owner'] },
   { prefix: '/reconcile', roles: ['accounting'] },
   { prefix: '/reports', roles: ['accounting'] },
   { method: 'POST', prefix: '/stock', roles: ['stock'] },

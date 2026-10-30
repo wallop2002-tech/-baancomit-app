@@ -7,6 +7,7 @@ import { reports } from './routes/reports'
 import { claims } from './routes/claims'
 import { installments } from './routes/installments'
 import { users } from './routes/users'
+import { importer } from './routes/import'
 import { api } from './routes/api'
 
 const app = new Hono<AppEnv>()
@@ -481,5 +482,6 @@ app.route('/', reports)
 app.route('/', claims)
 app.route('/', installments)
 app.route('/', users)
+app.route('/', importer)
 
 export default app

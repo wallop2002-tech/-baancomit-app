@@ -8,3 +8,10 @@ database_name = "baancomit-db"
 # ใส่ database_id ที่ได้จาก `npx wrangler d1 create baancomit-db`
 database_id = "f49ac2dc-89fe-46e9-a055-5d9a534ecb3d"
 migrations_dir = "migrations"
+
+# สร้างสคริปต์ของหน้า "นำเข้าข้อมูล" ก่อน dev/deploy ทุกครั้ง
+[build]
+command = "npm run build:client"
+
+[assets]
+directory = "./public"
