@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { audit } from '../db'
+import { audit, placeholders } from '../db'
 import { type AppEnv, BusinessSelect, back, page } from '../ui'
 
 export const users = new Hono<AppEnv>()
@@ -13,6 +13,13 @@ users.get('/users', async (c) => {
   ).all<any>()
   const sel = c.get('selected')
   const q = sel ? `?b=${sel}` : ''
+  const ids = c.get('businesses').map((b) => b.id)
+  const { results: teams } = await c.env.DB.prepare(
+    `SELECT t.id, t.name, t.code, b.name business,
+            (SELECT group_concat(u.name || '|' || u.id, ',') FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = t.id) members
+     FROM teams t JOIN businesses b ON b.id = t.business_id WHERE t.business_id IN (${placeholders(ids.length)}) ORDER BY t.business_id, t.name`,
+  ).bind(...ids).all<{ id: number; name: string; code: string | null; business: string; members: string | null }>()
+  const people = [...new Map(results.map((r) => [r.id, r])).values()]
   return page(
     c,
     'ผู้ใช้',
@@ -29,6 +36,46 @@ users.get('/users', async (c) => {
             <select name="role">{Object.entries(ROLE_LABEL).map(([v, l]) => <option value={v}>{l}</option>)}</select>
           </label>
           <button>บันทึก</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>ทีมขาย</h3>
+        <p class="muted">เซลล์ลงยอดได้เฉพาะทีมที่สังกัด (ต้องมีบทบาทเซลล์ในกิจการนั้นด้วย) เจ้าของและบัญชีเห็นทุกทีม รหัสทีมคือค่าในคอลัมน์ "ทีม" ของชีต เช่น 1 หรือ X ใช้สร้าง KEY</p>
+        <form class="inline" method="post" action={`/users/team-members${q}`}>
+          <label>ผู้ใช้
+            <select name="user_id" required>{people.map((p) => <option value={String(p.id)}>{p.name} ({p.email})</option>)}</select>
+          </label>
+          <label>ทีม
+            <select name="team_id" required>{teams.map((t) => <option value={String(t.id)}>{t.business} · {t.name}</option>)}</select>
+          </label>
+          <button>เพิ่มเข้าทีม</button>
+        </form>
+        <table style="margin-top:12px">
+          <tr><th>กิจการ</th><th>ทีม</th><th>รหัส</th><th>สมาชิก</th></tr>
+          {teams.map((t) => (
+            <tr>
+              <td>{t.business}</td><td>{t.name}</td><td>{t.code ?? '-'}</td>
+              <td>
+                {(t.members ? t.members.split(',') : []).map((m) => {
+                  const [name, id] = m.split('|')
+                  return (
+                    <form method="post" action={`/users/team-members/remove${q}`} style="display:inline-block;margin-right:12px">
+                      <input type="hidden" name="user_id" value={id} />
+                      <input type="hidden" name="team_id" value={String(t.id)} />
+                      {name} <button class="link" title="เอาออกจากทีม">✕</button>
+                    </form>
+                  )
+                })}
+              </td>
+            </tr>
+          ))}
+        </table>
+        <h4>เพิ่มทีมใหม่</h4>
+        <form class="inline" method="post" action={`/users/teams${q}`}>
+          <BusinessSelect businesses={c.get('businesses')} selected={sel} />
+          <label>ชื่อทีม<input name="name" required placeholder="ทีม 6" /></label>
+          <label>รหัสทีม<input name="code" required placeholder="6" maxlength={5} /></label>
+          <button>เพิ่มทีม</button>
         </form>
       </div>
       <div class="card scroll">
@@ -88,4 +135,44 @@ users.post('/users/:id/remove', async (c) => {
   await db.prepare('DELETE FROM memberships WHERE user_id = ? AND business_id = ?').bind(userId, businessId).run()
   await audit(db, 'memberships', userId, 'revoke', { business_id: businessId })
   return c.redirect(back('/users', sel, { ok: 'ถอนสิทธิ์แล้ว' }))
+})
+
+// ทีมต้องอยู่ในกิจการที่ผู้ใช้มีสิทธิ์
+async function teamInScope(c: any, teamId: number): Promise<boolean> {
+  const ids: number[] = c.get('businesses').map((b: { id: number }) => b.id)
+  const t = await c.env.DB.prepare('SELECT business_id FROM teams WHERE id = ?').bind(teamId).first()
+  return !!t && ids.includes(t.business_id)
+}
+
+users.post('/users/teams', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const name = (f.name ?? '').trim()
+  const code = (f.code ?? '').trim()
+  if (!name || !code) return c.redirect(back('/users', sel, { err: 'ใส่ชื่อทีมและรหัสทีม' }))
+  await c.env.DB.prepare('INSERT INTO teams (business_id, name, code) VALUES (?, ?, ?) ON CONFLICT(business_id, name) DO UPDATE SET code = excluded.code')
+    .bind(Number(f.business_id), name, code)
+    .run()
+  await audit(c.env.DB, 'teams', 0, 'upsert', f)
+  return c.redirect(back('/users', sel, { ok: `บันทึกทีม ${name} แล้ว` }))
+})
+
+users.post('/users/team-members', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const teamId = Number(f.team_id)
+  if (!(await teamInScope(c, teamId))) return c.redirect(back('/users', sel, { err: 'ไม่มีสิทธิ์ในทีมนี้' }))
+  await c.env.DB.prepare('INSERT OR IGNORE INTO team_members (user_id, team_id) VALUES (?, ?)').bind(Number(f.user_id), teamId).run()
+  await audit(c.env.DB, 'team_members', teamId, 'add', f)
+  return c.redirect(back('/users', sel, { ok: 'เพิ่มเข้าทีมแล้ว' }))
+})
+
+users.post('/users/team-members/remove', async (c) => {
+  const f = await c.req.parseBody<Record<string, string>>()
+  const sel = c.get('selected')
+  const teamId = Number(f.team_id)
+  if (!(await teamInScope(c, teamId))) return c.redirect(back('/users', sel, { err: 'ไม่มีสิทธิ์ในทีมนี้' }))
+  await c.env.DB.prepare('DELETE FROM team_members WHERE user_id = ? AND team_id = ?').bind(Number(f.user_id), teamId).run()
+  await audit(c.env.DB, 'team_members', teamId, 'remove', f)
+  return c.redirect(back('/users', sel, { ok: 'เอาออกจากทีมแล้ว' }))
 })

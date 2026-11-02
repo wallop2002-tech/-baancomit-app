@@ -15,6 +15,7 @@ const RULES: { method?: string; prefix: string; roles: Role[] }[] = [
   { method: 'POST', prefix: '/products', roles: ['stock'] },
   { method: 'POST', prefix: '/claims', roles: ['stock'] },
   { method: 'POST', prefix: '/orders', roles: ['sales', 'accounting'] },
+  { method: 'POST', prefix: '/sales', roles: ['sales', 'accounting'] },
   { method: 'POST', prefix: '/installments', roles: ['sales', 'accounting'] },
 ]
 

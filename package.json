@@ -9,7 +9,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply baancomit-db --remote",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "import": "tsx scripts/import.ts",
-    "build:client": "esbuild src/client/import.ts --bundle --format=esm --minify --outfile=public/static/import.js"
+    "build:client": "esbuild src/client/import.ts src/client/sales.ts --bundle --format=esm --minify --outdir=public/static"
   },
   "dependencies": {
     "hono": "^4.13.14",

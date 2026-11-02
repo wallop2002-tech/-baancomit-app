@@ -45,6 +45,7 @@ export function Layout(props: { title: string; businesses: Business[]; selected:
         <header>
           <strong>ระบบรวมงานร้าน</strong>
           <nav>
+            <a href={`/sales${q}`}>ลงยอดขาย</a>
             <a href={`/${q}`}>ภาพรวม</a>
             <a href={`/orders${q}`}>ออเดอร์ขาย</a>
             <a href={`/stock${q}`}>สต็อก</a>
