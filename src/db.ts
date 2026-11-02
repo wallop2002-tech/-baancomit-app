@@ -6,6 +6,7 @@ export type Env = {
   // token สำหรับระบบภายนอกที่เรียก /api
   API_TOKEN?: string
   DEV_TRUST_EMAIL_HEADER?: string
+  CF_VERSION_METADATA?: { id: string }
 }
 
 export type Business = { id: number; parent_id: number | null; code: string; name: string }

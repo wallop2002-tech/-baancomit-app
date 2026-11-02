@@ -64,6 +64,11 @@ export function BusinessSelect(props: { businesses: Business[]; selected: number
   )
 }
 
+// ลิงก์ไฟล์สคริปต์พร้อมรหัสเวอร์ชัน กันเบราว์เซอร์ใช้ไฟล์เก่าที่แคชไว้หลัง deploy
+export function asset(c: Ctx, path: string): string {
+  return `${path}?v=${c.env.CF_VERSION_METADATA?.id ?? Date.now()}`
+}
+
 // วันที่วันนี้ตามเวลาไทย
 export function today(): string {
   return new Date(Date.now() + 7 * 3600e3).toISOString().slice(0, 10)
