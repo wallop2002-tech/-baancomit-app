@@ -95,10 +95,13 @@ table.sheet tr.dirty td.rownum { background:#fff3c4; color:#1d1d1b; }
 table.sheet tr.bad td { background:#fbebeb; }
 table.sheet tr.deleted td { text-decoration:line-through; opacity:.5; }
 table.sheet input.invalid { background:#fbd5d5; color:#1d1d1b; }
-table.sheet tr.ship td { background:var(--bg); }
-table.sheet tr.ship td.lbl { color:var(--muted); font-size:12px; padding:0 6px; white-space:nowrap; }
-table.sheet tr.ship input::placeholder { color:var(--muted); opacity:.6; }
-table.sheet tr.ship td { border-bottom:2px solid var(--line); }
+table.sheet td.view { padding:5px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+table.sheet td.view.num { text-align:right; }
+table.sheet tr.editing td { background:#eef4ff; }
+@media (prefers-color-scheme: dark) { table.sheet tr.editing td { background:#1e2a3d; } }
+table.sheet td.tools { white-space:nowrap; padding:0 4px; }
+table.sheet td.tools button { background:none; color:var(--accent); padding:2px 6px; }
+table.sheet td.tools button.danger { color:#c0392b; }
 table.sheet tfoot td { padding:5px 6px; font-weight:600; background:var(--bg); white-space:nowrap; }
 table.sheet button.del { background:none; color:var(--muted); padding:2px 8px; }
 #msg { min-height:1.4em; }
@@ -147,13 +150,14 @@ sales.get('/sales', async (c) => {
           เดือน
           <input type="month" name="month" value={month} onchange="this.form.submit()" />
         </label>
-        <span class="spacer"></span>
-        <span id="msg" class="muted"></span>
-        <button type="button" id="add">+ เพิ่มแถว</button>
-        <button type="button" id="save">บันทึก</button>
       </form>
+      <div class="sheet-bar">
+        <button type="button" id="add">+ เพิ่ม</button>
+        <button type="button" id="save">บันทึก</button>
+        <span id="msg" class="muted"></span>
+      </div>
       <p class="muted" style="margin-top:0">
-        แต่ละรายการมี 2 บรรทัดเหมือนในชีต บรรทัดบนคือยอดขาย บรรทัดล่างคือข้อมูลจัดส่ง (ชื่อ ที่อยู่ เบอร์มือถือ หมายเหต) วันที่พิมพ์แบบ 1/12 ได้ รุ่นเครื่องเลือกจาก<a href="/products">ตารางรุ่น</a> ราคาจริงและ M ดึงจากตารางรุ่นให้เอง กด Enter ลงแถวถัดไป กด Ctrl+S หรือปุ่มบันทึกเพื่อเก็บ
+        กด <b>+ เพิ่ม</b> เพื่อลงรายการใหม่ หรือกด <b>แก้ไข</b> ที่แถวเดิม แล้วกด <b>บันทึก</b> (หรือ Ctrl+S) วันที่พิมพ์แบบ 1/12 ได้ รุ่นเครื่องเลือกจาก<a href="/products">ตารางรุ่น</a> กด ▲▼ เพื่อเลื่อนลำดับแถว
       </p>
       <div class="sheet-wrap">
         <table class="sheet" id="sheet"></table>
