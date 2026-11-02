@@ -22,6 +22,8 @@ const INSTALLMENT_TAB = 'จดยอดขายเซลล์ - ผ่อน'
 const isStoreFront = (team: string) => team.trim().toUpperCase() === 'X'
 const salesBusiness = (team: string) => (isStoreFront(team) ? 5 : 4)
 const teamLabel = (team: string) => (isStoreFront(team) ? 'หน้าร้าน' : `ทีม ${team}`)
+const teamCode = (team: string) => (isStoreFront(team) ? 'X' : team.trim())
+const MODELS_TAB = 'จดยอดขายเซลล์ - รุ่นและราคา'
 const OUR_BUSINESSES = new Set(['ไนซ์ไอที', 'นายไอที', 'บ้านคอมไอที', 'BAANCOMIT'])
 
 // ---------- CSV ----------
@@ -170,7 +172,7 @@ export function buildSql(readTab: TabReader): { statements: string[]; sql: strin
       const status = /ไม่รับ|ตีกลับ|ยกเลิก/.test(r[19]) ? 'returned' : total > 0 && paid >= total ? 'paid' : r[2] ? 'shipped' : 'open'
 
       out.push(`INSERT OR IGNORE INTO customers (facebook_name, full_name, legacy_key) VALUES (${q(r[5])}, ${q(hasRealName ? r[6] : null)}, ${q(key)});`)
-      if (r[8]) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${tab.business}, ${q(teamLabel(r[8]))});`)
+      if (r[8]) out.push(`INSERT OR IGNORE INTO teams (business_id, name, code) VALUES (${tab.business}, ${q(teamLabel(r[8]))}, ${q(teamCode(r[8]))});`)
       out.push(
         `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) VALUES (${tab.business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${r[8] ? `(SELECT id FROM teams WHERE business_id = ${tab.business} AND name = ${q(teamLabel(r[8]))})` : 'NULL'}, '${soldOn}', ${q(r[7])}, ${total}, ${q(toSatang(r[25]))}, '${paymentType}', '${status}', ${q([r[19], r[29]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(saleKey(soldOn, r[8], r[5]))});`,
       )
@@ -207,6 +209,15 @@ export function buildSql(readTab: TabReader): { statements: string[]; sql: strin
     }
   }
 
+  // ตารางรุ่น: ราคาเครื่องและ Margin จากแท็บ "รุ่นและราคา" ใช้ในหน้าลงยอดขาย
+  for (const r0 of (readTab(MODELS_TAB) ?? []).slice(1)) {
+    const [code, price, margin] = r0.map((s) => (s ?? '').trim())
+    if (!code) continue
+    out.push(`INSERT OR IGNORE INTO products (business_id, code) VALUES (${BCI}, ${q(code)});`)
+    out.push(`UPDATE products SET list_price_satang = ${q(toSatang(price))}, margin_satang = ${q(toSatang(margin))} WHERE business_id = ${BCI} AND code = ${q(code)};`)
+    bump('รุ่นและราคา')
+  }
+
   // ยอดขายจากแท็บเซลล์ทีม ที่ยังไม่มีในสมุดโอนครบ (เช่น รับหน้าร้าน) จับซ้ำด้วย KEY
   for (const file of SALES_TABS) {
     const rows = readTab(file)
@@ -228,9 +239,9 @@ export function buildSql(readTab: TabReader): { statements: string[]; sql: strin
       const teamName = team ? teamLabel(team) : null
       const fresh = `NOT EXISTS (SELECT 1 FROM orders WHERE sale_key = ${q(sk)} AND legacy_key != ${q(key)})`
       out.push(`INSERT OR IGNORE INTO customers (facebook_name, legacy_key) SELECT ${q(name)}, ${q(key)} WHERE ${fresh};`)
-      if (teamName) out.push(`INSERT OR IGNORE INTO teams (business_id, name) VALUES (${business}, ${q(teamName)});`)
+      if (teamName) out.push(`INSERT OR IGNORE INTO teams (business_id, name, code) VALUES (${business}, ${q(teamName)}, ${q(teamCode(team))});`)
       out.push(
-        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key) SELECT ${business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${teamName ? `(SELECT id FROM teams WHERE business_id = ${business} AND name = ${q(teamName)})` : 'NULL'}, '${soldOn}', ${q(house)}, ${total}, ${q(toSatang(r[14]))}, '${paymentType}', '${total > 0 && paid >= total ? 'paid' : 'open'}', ${q([file.split(' - ')[1], r[11]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(sk)} WHERE ${fresh};`,
+        `INSERT OR IGNORE INTO orders (business_id, customer_id, team_id, sold_on, house_no, price_satang, real_price_satang, payment_type, status, note, legacy_key, sale_key, transfer_satang, cod_satang, installment_satang, key_com, is_ad, margin_satang) SELECT ${business}, (SELECT id FROM customers WHERE legacy_key = ${q(key)}), ${teamName ? `(SELECT id FROM teams WHERE business_id = ${business} AND name = ${q(teamName)})` : 'NULL'}, '${soldOn}', ${q(house)}, ${total}, ${q(toSatang(r[14]))}, '${paymentType}', '${total > 0 && paid >= total ? 'paid' : 'open'}', ${q([file.split(' - ')[1], r[11]].filter(Boolean).join(' · '))}, ${q(key)}, ${q(sk)}, ${q(toSatang(transferred))}, ${q(toSatang(cod))}, ${q(toSatang(installment))}, ${q(r[9])}, ${r[10]?.toUpperCase() === 'TRUE' ? 1 : 0}, ${q(toSatang(r[15]))} WHERE ${fresh};`,
       )
       out.push(`INSERT OR IGNORE INTO products (business_id, code) VALUES (${BCI}, ${q(model)});`)
       out.push(`INSERT OR IGNORE INTO order_items (order_id, product_id, price_satang, legacy_key) SELECT ${order(key)}, (SELECT id FROM products WHERE business_id = ${BCI} AND code = ${q(model)}), ${total}, ${q(key)} WHERE ${order(key)} IS NOT NULL;`)
@@ -310,6 +321,11 @@ export function buildSql(readTab: TabReader): { statements: string[]; sql: strin
   // ธนาคารต้องเข้าก่อนออเดอร์ เพื่อให้การผูก Keyโอน หาแถวเจอ ส่วน COD ต้องตามหลังพัสดุ
   const stockEnd = out.findIndex((s) => s.startsWith('INSERT OR IGNORE INTO customers'))
   const ordered = stockEnd < 0 ? [...bankSql, ...out, ...codSql] : [...out.slice(0, stockEnd), ...bankSql, ...out.slice(stockEnd), ...codSql]
+  // ช่องโอนแล้ว/ยอดกปท ของหน้าลงยอดขาย สำหรับออเดอร์จากสมุดโอนครบ
+  ordered.push(
+    `UPDATE orders SET transfer_satang = (SELECT SUM(amount_satang) FROM payments p WHERE p.order_id = orders.id AND p.kind IN ('transfer', 'extra_transfer')) WHERE legacy_key IS NOT NULL AND transfer_satang IS NULL;`,
+    `UPDATE orders SET cod_satang = (SELECT SUM(cod_satang) FROM shipments s WHERE s.order_id = orders.id AND s.cod_satang > 0) WHERE legacy_key IS NOT NULL AND cod_satang IS NULL;`,
+  )
   // ออเดอร์ที่ได้เงินครบหลังรวม COD แล้ว
   ordered.push(
     `UPDATE orders SET status = 'paid' WHERE legacy_key IS NOT NULL AND status IN ('open', 'shipped') AND price_satang > 0 AND price_satang <= (SELECT COALESCE(SUM(amount_satang), 0) FROM payments p WHERE p.order_id = orders.id AND p.match_status = 'confirmed');`,
@@ -322,7 +338,7 @@ export function buildSql(readTab: TabReader): { statements: string[]; sql: strin
 export const SOURCE_TABS: Record<string, string[]> = {
   IT_STOCK_SYSTEM: ['MASTER_STOCK', 'STOCK_OUT', 'CLAIM_CUST', 'CLAIM_OUT'],
   สมุดโอนครบ: ['วีแคร์ยู', 'KhunNoi', 'กสิกร', 'BankNoi', 'COD_WCY', 'COD_Noi'],
-  จดยอดขายเซลล์: ['เซลล์ทีม_1', 'เซลล์ทีม_2', 'เซลล์ทีม_3', 'เซลล์ทีม_4', 'ร้าน', 'ADS', 'ผ่อน'],
+  จดยอดขายเซลล์: ['เซลล์ทีม_1', 'เซลล์ทีม_2', 'เซลล์ทีม_3', 'เซลล์ทีม_4', 'ร้าน', 'ADS', 'ผ่อน', 'รุ่นและราคา'],
 }
 // ชีตแต่ละไฟล์มีแท็บซ้ำชื่อกันได้ (เช่น BankNoi, MASTER_STOCK) จึงระบุไฟล์จากแท็บที่มีเฉพาะไฟล์นั้น
 export const SOURCE_SIGNATURE: Record<string, string> = { IT_STOCK_SYSTEM: 'STOCK_OUT', สมุดโอนครบ: 'COD_WCY', จดยอดขายเซลล์: 'เซลล์ทีม_1' }

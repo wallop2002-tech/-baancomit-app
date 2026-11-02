@@ -7,6 +7,7 @@ import { reports } from './routes/reports'
 import { claims } from './routes/claims'
 import { installments } from './routes/installments'
 import { users } from './routes/users'
+import { sales } from './routes/sales'
 import { importer } from './routes/import'
 import { api } from './routes/api'
 
@@ -21,6 +22,9 @@ app.use('*', access)
 
 // ---------- ภาพรวม ----------
 app.get('/', async (c) => {
+  // เซลล์ที่ไม่มีบทบาทอื่น เข้ามาแล้วไปหน้าลงยอดขายเลย
+  const roles = c.get('roles')
+  if (c.get('user') && roles.size === 1 && roles.has('sales')) return c.redirect(`/sales${c.get('selected') ? `?b=${c.get('selected')}` : ''}`)
   const scope = c.get('scope')
   const ph = placeholders(scope.length)
   const today = new Date(Date.now() + 7 * 3600e3).toISOString().slice(0, 10)
@@ -60,7 +64,7 @@ app.get('/', async (c) => {
 app.get('/products', async (c) => {
   const scope = c.get('stockScope')
   const { results } = await c.env.DB.prepare(
-    `SELECT p.id, p.code, p.spec, p.list_price_satang, b.name business,
+    `SELECT p.id, p.code, p.spec, p.list_price_satang, p.margin_satang, b.name business,
             (SELECT COUNT(*) FROM serial_units u WHERE u.product_id = p.id AND u.status = 'in_stock') in_stock
      FROM products p JOIN businesses b ON b.id = p.business_id
      WHERE p.business_id IN (${placeholders(scope.length)}) ORDER BY p.code`,
@@ -70,20 +74,22 @@ app.get('/products', async (c) => {
     'รุ่นสินค้า',
     <>
       <div class="card">
-        <h3>เพิ่มรุ่น</h3>
+        <h3>เพิ่มหรือแก้รุ่น</h3>
+        <p class="muted">ตารางรุ่นที่หน้าลงยอดขายใช้ ใส่ Product_ID เดิมเพื่อแก้ราคาเครื่องและ Margin</p>
         <form class="inline" method="post" action="/products">
           <BusinessSelect businesses={c.get('businesses')} selected={c.get('selected')} stock />
           <label>Product_ID<input name="code" required placeholder="Ti3B35" /></label>
           <label>สเปค<input name="spec" placeholder="Acer P214 Ci5 Gen11 R8 ssd256" /></label>
-          <label>ราคาตั้ง (บาท)<input name="list_price" inputmode="decimal" /></label>
+          <label>ราคาเครื่อง (บาท)<input name="list_price" inputmode="decimal" /></label>
+          <label>Margin (บาท)<input name="margin" inputmode="decimal" /></label>
           <button>บันทึก</button>
         </form>
       </div>
       <div class="card scroll">
         <table>
-          <tr><th>Product_ID</th><th>สเปค</th><th>ราคาตั้ง</th><th>คงเหลือ</th><th>กิจการ</th></tr>
+          <tr><th>Product_ID</th><th>สเปค</th><th>ราคาเครื่อง</th><th>Margin</th><th>คงเหลือ</th><th>กิจการ</th></tr>
           {results.map((p) => (
-            <tr><td>{p.code}</td><td>{p.spec}</td><td>{baht(p.list_price_satang)}</td><td>{p.in_stock}</td><td>{p.business}</td></tr>
+            <tr><td>{p.code}</td><td>{p.spec}</td><td>{baht(p.list_price_satang)}</td><td>{baht(p.margin_satang)}</td><td>{p.in_stock}</td><td>{p.business}</td></tr>
           ))}
         </table>
       </div>
@@ -95,11 +101,16 @@ app.post('/products', async (c) => {
   const f = await c.req.parseBody<Record<string, string>>()
   const sel = c.get('selected')
   try {
-    const r = await c.env.DB.prepare('INSERT INTO products (business_id, code, spec, list_price_satang) VALUES (?, ?, ?, ?)')
-      .bind(stockOwner(c.get('allBusinesses'), Number(f.business_id)), f.code.trim(), f.spec ?? '', toSatang(f.list_price))
+    // รุ่นเดิม: แก้เฉพาะช่องที่กรอก
+    const r = await c.env.DB.prepare(
+      `INSERT INTO products (business_id, code, spec, list_price_satang, margin_satang) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(business_id, code) DO UPDATE SET spec = CASE WHEN excluded.spec != '' THEN excluded.spec ELSE spec END,
+         list_price_satang = COALESCE(excluded.list_price_satang, list_price_satang), margin_satang = COALESCE(excluded.margin_satang, margin_satang)`,
+    )
+      .bind(stockOwner(c.get('allBusinesses'), Number(f.business_id)), f.code.trim(), f.spec ?? '', toSatang(f.list_price), toSatang(f.margin))
       .run()
-    await audit(c.env.DB, 'products', r.meta.last_row_id, 'create', f)
-    return c.redirect(back('/products', sel, { ok: `เพิ่มรุ่น ${f.code} แล้ว` }))
+    await audit(c.env.DB, 'products', r.meta.last_row_id, 'upsert', f)
+    return c.redirect(back('/products', sel, { ok: `บันทึกรุ่น ${f.code} แล้ว` }))
   } catch (e) {
     return c.redirect(back('/products', sel, { err: `เพิ่มไม่ได้: ${String(e)}` }))
   }
@@ -478,6 +489,7 @@ app.post('/reconcile/confirm', async (c) => {
   return c.redirect(back('/reconcile', sel, { ok: `จับคู่เงิน ${baht(txn.amount_satang)} กับออเดอร์ #${orderId} แล้ว` }))
 })
 
+app.route('/', sales)
 app.route('/', reports)
 app.route('/', claims)
 app.route('/', installments)
