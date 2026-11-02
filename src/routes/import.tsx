@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { audit } from '../db'
-import { type AppEnv, page } from '../ui'
+import { type AppEnv, asset, page } from '../ui'
 
 export const importer = new Hono<AppEnv>()
 
@@ -23,7 +23,7 @@ importer.get('/import', (c) =>
         <div><progress id="progress" value="0" max="1" style="width:100%"></progress></div>
         <pre id="status" style="white-space:pre-wrap"></pre>
       </div>
-      <script type="module" src="/static/import.js"></script>
+      <script type="module" src={asset(c, '/static/import.js')}></script>
     </>,
   ),
 )

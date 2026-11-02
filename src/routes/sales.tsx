@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { raw } from 'hono/html'
 import { audit, placeholders, stockOwner, toSatang } from '../db'
 import { saleKey } from '../importer'
-import { type AppEnv, type Ctx, page, today } from '../ui'
+import { type AppEnv, type Ctx, asset, page, today } from '../ui'
 
 // หน้าลงยอดขายแบบชีต "จดยอดขายเซลล์": เซลล์ลงยอดของทีมตัวเองทีละแถว แล้วกดบันทึก
 export const sales = new Hono<AppEnv>()
@@ -168,7 +168,7 @@ sales.get('/sales', async (c) => {
         ))}
       </datalist>
       <script type="application/json" id="sales-data">{raw(embed(data))}</script>
-      <script type="module" src="/static/sales.js"></script>
+      <script type="module" src={asset(c, '/static/sales.js')}></script>
     </>,
   )
 })
